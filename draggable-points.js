@@ -2,7 +2,7 @@
  * Draggable points plugin for Highcharts JS
  * Author: Torstein Honsi
  * License: MIT License
- * Version: 2.0.6 (2017-02-03)
+ * Version: 2.0.7 (2017-10-20)
  */
 
 /*global document, Highcharts */
@@ -18,7 +18,9 @@
 
     var addEvent = Highcharts.addEvent,
         each = Highcharts.each,
-        pick = Highcharts.pick;
+        extend = Highcharts.extend,
+        pick = Highcharts.pick,
+        columnProto = Highcharts.seriesTypes.column.prototype;
 
 
     /**
@@ -93,6 +95,8 @@
                     y: draggableY ? newY : dragPoint.y,
                     high: (draggableY && !changeLow) ? newHigh : dragPoint.high,
                     low: (draggableY && changeLow) ? newLow : dragPoint.low,
+                    dragStart: dragStart,
+                    originalEvent: e
                 };
             } else {
                 return null;
@@ -103,24 +107,26 @@
          * Handler for mouseup
          */
         function drop(e) {
-            var newPos;
-            if (dragPoint) {
-                if (e) {
-                    newPos = getNewPos(e);
-                    if (newPos) {
-                        dragPoint.update(newPos);
+            var newPos = dragPoint && e && getNewPos(e);
 
-                        // Update k-d-tree immediately to prevent tooltip jump (#43)
-                        dragPoint.series.options.kdNow = true;
-                        dragPoint.series.buildKDTree();
-                    }
-                }
-                if (newPos) {
-                    newPos.dragStart = dragStart;
-                    dragPoint.firePointEvent('drop', newPos);
-                }
+            function reset() {
+                dragPoint = dragX = dragY = undefined;
             }
-            dragPoint = dragX = dragY = undefined;
+
+            if (newPos) {
+                dragPoint.firePointEvent('drop', newPos, function () {
+                    dragPoint.update(newPos);
+
+                    // Update k-d-tree immediately to prevent tooltip jump (#43)
+                    dragPoint.series.options.kdNow = true;
+                    dragPoint.series.buildKDTree();
+
+                    reset();
+                });
+            } else {
+                reset();
+            }
+            
         }
 
         /**
@@ -130,7 +136,8 @@
             var options,
                 originalEvent = e.originalEvent || e,
                 hoverPoint,
-                series;
+                series,
+                bottom;
 
             if ((originalEvent.target.getAttribute('class') || '').indexOf('highcharts-handle') !== -1) {
                 hoverPoint = originalEvent.target.point;
@@ -153,9 +160,11 @@
 
                 if (options.draggableY && hoverPoint.draggableY !== false) {
                     dragPoint = hoverPoint;
+                    // Added support for normal stacking (#78)
+                    bottom = pick(series.translatedThreshold, chart.plotHeight);
 
                     dragY = originalEvent.changedTouches ? originalEvent.changedTouches[0].pageY : e.pageY;
-                    dragPlotY = dragPoint.plotY + (chart.plotHeight - (dragPoint.yBottom || chart.plotHeight));
+                    dragPlotY = dragPoint.plotY + (bottom - (dragPoint.yBottom || bottom));
                     dragStart.y = dragPoint.y;
                     if (dragPoint.plotHigh) {
                         dragPlotHigh = dragPoint.plotHigh;
@@ -176,16 +185,15 @@
          */
         function mouseMove(e) {
 
-            e.preventDefault();
-
             if (dragPoint) {
+
+                e.preventDefault();
 
                 var evtArgs = getNewPos(e), // Gets x and y
                     proceed;
 
                 // Fire the 'drag' event with a default action to move the point.
                 if (evtArgs) {
-                    evtArgs.dragStart = dragStart;
                     dragPoint.firePointEvent(
                         'drag',
                         evtArgs,
@@ -204,9 +212,8 @@
                             }
 
                             // Let the tooltip follow and reflect the drag point
-                            if (chart.tooltip) {
-                                chart.tooltip.refresh(chart.tooltip.shared ? [dragPoint] : dragPoint);
-                            }
+                            chart.pointer.reset(true);
+
 
                             // Stacking requires full redraw
                             if (series.stackKey) {
@@ -252,44 +259,54 @@
     });
 
     /**
-     * Extend the column chart tracker by visualizing the tracker object for small points
+     * Extend the column chart tracker by visualizing the tracker object for
+     * small points
      */
-    Highcharts.seriesTypes.column.prototype.useDragHandle = function () {
+    columnProto.useDragHandle = function () {
         var is3d = this.chart.is3d && this.chart.is3d();
         return !is3d;
     };
 
-    Highcharts.seriesTypes.column.prototype.dragHandlePath = function (shapeArgs, strokeW) {
-        var x1 = shapeArgs.x,
-            y = shapeArgs.y,
+    columnProto.dragHandlePath = function (shapeArgs, strokeW, isNegative) {
+        var h = 6,
+            h1 = h / 3,
+            h2 = h1 * 2,
+            x1 = shapeArgs.x,
+            y = (isNegative ? shapeArgs.height - h : 0) + shapeArgs.y,
             x2 = shapeArgs.x + shapeArgs.width;
 
         return [
-            'M', x1, y + 6 * strokeW,
+            'M', x1, y + h * strokeW,
             'L', x1, y,
             'L', x2, y,
-            'L', x2, y + 2 * strokeW,
-            'L', x1, y + 2 * strokeW,
-            'L', x2, y + 2 * strokeW,
-            'L', x2, y + 4 * strokeW,
-            'L', x1, y + 4 * strokeW,
-            'L', x2, y + 4 * strokeW,
-            'L', x2, y + 6 * strokeW
+            'L', x2, y + h1 * strokeW,
+            'L', x1, y + h1 * strokeW,
+            'L', x2, y + h1 * strokeW,
+            'L', x2, y + h2 * strokeW,
+            'L', x1, y + h2 * strokeW,
+            'L', x2, y + h2 * strokeW,
+            'L', x2, y + h * strokeW
         ];
     };
 
-    Highcharts.wrap(Highcharts.seriesTypes.column.prototype, 'drawTracker', function (proceed) {
+    Highcharts.wrap(columnProto, 'drawTracker', function (proceed) {
         var series = this,
             options = series.options,
             strokeW = series.borderWidth || 0;
 
         proceed.apply(series);
 
-        if (this.useDragHandle() && (options.draggableX || options.draggableY)) {
+        if (
+            this.useDragHandle() &&
+            (options.draggableX || options.draggableY)
+        ) {
 
             each(series.points, function (point) {
 
-                var path = (options.dragHandlePath || series.dragHandlePath)(point.shapeArgs, strokeW);
+                var path = (
+                        options.dragHandlePath ||
+                        series.dragHandlePath
+                    )(point.shapeArgs, strokeW, point.negative);
 
                 if (!point.handle) {
                     point.handle = series.chart.renderer.path(path)
@@ -297,7 +314,9 @@
                             fill: options.dragHandleFill || 'rgba(0,0,0,0.5)',
                             'class': 'highcharts-handle',
                             'stroke-width': strokeW,
-                            'stroke': options.dragHandleStroke || options.borderColor || 1
+                            'stroke': options.dragHandleStroke ||
+                                options.borderColor ||
+                                1
                         })
                         .css({
                             cursor: 'ns-resize'
